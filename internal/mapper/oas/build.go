@@ -7,7 +7,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/raphaelfff/terraform-plugin-codegen-openapi/internal/mapper/util"
 
@@ -139,29 +141,33 @@ func buildSchemaProxy(proxy *base.SchemaProxy) (*base.Schema, *SchemaError) {
 	if len(s.AnyOf) > 0 {
 		if len(s.AnyOf) == 2 {
 			schema, err := getMultiTypeSchema(s.AnyOf[0], s.AnyOf[1])
-			if err != nil {
-				return nil, err
+			if err == nil {
+				return schema, nil
 			}
-
-			return schema, nil
 		}
 
-		// Dynamic type currently not supported
-		return nil, SchemaErrorFromNode(fmt.Errorf("found %d anyOf subschema(s), schema composition is currently not supported", len(s.AnyOf)), s, AnyOf)
+		schema, err := handleOneOfAnyOf(s.AnyOf)
+		if err != nil {
+			return nil, SchemaErrorFromNode(err, s, AnyOf)
+		}
+
+		return schema, nil
 	}
 
 	if len(s.OneOf) > 0 {
 		if len(s.OneOf) == 2 {
 			schema, err := getMultiTypeSchema(s.OneOf[0], s.OneOf[1])
-			if err != nil {
-				return nil, err
+			if err == nil {
+				return schema, nil
 			}
-
-			return schema, nil
 		}
 
-		// Dynamic type currently not supported
-		return nil, SchemaErrorFromNode(fmt.Errorf("found %d oneOf subschema(s), schema composition is currently not supported", len(s.OneOf)), s, OneOf)
+		schema, err := handleOneOfAnyOf(s.OneOf)
+		if err != nil {
+			return nil, SchemaErrorFromNode(err, s, OneOf)
+		}
+
+		return schema, nil
 	}
 
 	// If there is just one allOf, we can use it as the schema
@@ -179,9 +185,93 @@ func buildSchemaProxy(proxy *base.SchemaProxy) (*base.Schema, *SchemaError) {
 		return allOfSchema, nil
 	}
 
-	// Combining multiple allOf schemas and their properties is possible here, but currently not supported
-	// See: https://github.com/raphaelfff/terraform-plugin-codegen-openapi/issues/56
-	return nil, SchemaErrorFromNode(fmt.Errorf("found %d allOf subschema(s), schema composition is currently not supported", len(s.AllOf)), s, AllOf)
+	compoundSchema, err := compoundAllOf(s)
+	if err != nil {
+		return nil, SchemaErrorFromNode(fmt.Errorf("%w, schema composition is currently not supported", err), s, AllOf)
+	}
+
+	return compoundSchema, nil
+}
+
+var oneOfAnyOfReg = regexp.MustCompile("[^a-zA-Z0-9_]+")
+
+func handleOneOfAnyOf(s []*base.SchemaProxy) (*base.Schema, error) {
+	compoundSchema := &base.Schema{Properties: orderedmap.New[string, *base.SchemaProxy]()}
+	for i, schema := range s {
+		schema, err := buildSchemaProxy(schema)
+		if err != nil {
+			return nil, fmt.Errorf("%v: %w", i, err)
+		}
+
+		key := "field_" + strconv.Itoa(i)
+		if schema.Title != "" {
+			key = schema.Title
+			key = strings.ToLower(key)
+			key = strings.ReplaceAll(key, " ", "_")
+			key = oneOfAnyOfReg.ReplaceAllString(key, "")
+		}
+
+		compoundSchema.Properties.Store(key, base.CreateSchemaProxy(schema))
+	}
+
+	return compoundSchema, nil
+}
+
+func compoundAllOf(s *base.Schema) (*base.Schema, error) {
+	var commonType string
+	var schemas []*base.Schema
+	for i, schemaProxy := range s.AllOf {
+		schema, err := buildSchemaProxy(schemaProxy)
+		if err != nil {
+			return nil, fmt.Errorf("%v: building subschema", i)
+		}
+
+		schemas = append(schemas, schema)
+
+		typ, err := retrieveType(schema)
+		if err != nil {
+			return nil, fmt.Errorf("%v: %w", i, err)
+		}
+
+		if commonType == "" {
+			commonType = typ
+		} else if commonType != typ {
+			return nil, fmt.Errorf("%v: different types, got %v, expected %v", i, typ, commonType)
+		}
+	}
+
+	switch commonType {
+	case util.OAS_type_object:
+		return compoundAllOfObject(schemas)
+	case util.OAS_type_string:
+		return compoundAllOfString(schemas)
+	default:
+		return nil, fmt.Errorf("unhandled type: %v", commonType)
+	}
+}
+
+func compoundAllOfObject(s []*base.Schema) (*base.Schema, error) {
+	compoundSchema := &base.Schema{Properties: orderedmap.New[string, *base.SchemaProxy]()}
+	for i, schema := range s {
+		pair := schema.Properties.First()
+		for pair != nil {
+			pairSchema, err := buildSchemaProxy(pair.Value())
+			if err != nil {
+				return nil, fmt.Errorf("%v: %v: %w", i, pair.Key(), err)
+			}
+
+			compoundSchema.Properties.Store(pair.Key(), base.CreateSchemaProxy(pairSchema))
+
+			pair = pair.Next()
+		}
+	}
+
+	return compoundSchema, nil
+}
+
+func compoundAllOfString(s []*base.Schema) (*base.Schema, error) {
+	// TODO: enum
+	return &base.Schema{Type: []string{"string"}}, nil
 }
 
 // getMultiTypeSchema will check the types of both schemas provided and will return the non-null schema. If a null schema type is not
@@ -205,6 +295,15 @@ func getMultiTypeSchema(proxyOne *base.SchemaProxy, proxyTwo *base.SchemaProxy) 
 	secondType, err := retrieveType(secondSchema)
 	if err != nil {
 		return nil, err
+	}
+
+	if firstType == secondType {
+		s, err := compoundAllOfString([]*base.Schema{firstSchema, secondSchema})
+		if err != nil {
+			return nil, SchemaErrorFromNode(err, firstSchema, Type)
+		}
+
+		return s, nil
 	}
 
 	// Check for null type, if found, return the other type

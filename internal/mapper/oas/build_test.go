@@ -770,6 +770,42 @@ func TestBuildSchema_MultiTypes(t *testing.T) {
 				},
 			},
 		},
+		"random types - oneOf": {
+			schemaProxy: base.CreateSchemaProxy(&base.Schema{
+				OneOf: []*base.SchemaProxy{
+					base.CreateSchemaProxy(&base.Schema{
+						Type: []string{"object"},
+						Properties: orderedmap.ToOrderedMap(map[string]*base.SchemaProxy{
+							"field": base.CreateSchemaProxy(&base.Schema{
+								Type: []string{"string"},
+							}),
+						}),
+					}),
+					base.CreateSchemaProxy(&base.Schema{
+						Type:  []string{"string"},
+						Title: "Cool Type!",
+					}),
+				},
+			}),
+			expectedAttributes: attrmapper.ResourceAttributes{
+				&attrmapper.ResourceStringAttribute{
+					StringAttribute: resource.StringAttribute{ComputedOptionalRequired: "computed_optional"},
+					Name:            "cool_type",
+				},
+				&attrmapper.ResourceSingleNestedAttribute{
+					SingleNestedAttribute: resource.SingleNestedAttribute{ComputedOptionalRequired: "computed_optional"},
+					Name:                  "field_0",
+					Attributes: attrmapper.ResourceAttributes{
+						&attrmapper.ResourceStringAttribute{
+							StringAttribute: resource.StringAttribute{
+								ComputedOptionalRequired: schema.ComputedOptional,
+							},
+							Name: "field",
+						},
+					},
+				},
+			},
+		},
 		"list attributes with nullable element type - Type array": {
 			schemaProxy: base.CreateSchemaProxy(&base.Schema{
 				Type:     []string{"object"},
@@ -1063,6 +1099,49 @@ func TestBuildSchema_AllOfSchemaComposition(t *testing.T) {
 					StringAttribute: resource.StringAttribute{
 						ComputedOptionalRequired: schema.Required,
 						Description:              pointer("Override the string's description"),
+					},
+				},
+			},
+		},
+		"allOf with object composition": {
+			schemaProxy: base.CreateSchemaProxy(&base.Schema{
+				Type: []string{"object"},
+				AllOf: []*base.SchemaProxy{
+					base.CreateSchemaProxy(&base.Schema{
+						Type:     []string{"object"},
+						Required: []string{"string_allof_override"},
+						Properties: orderedmap.ToOrderedMap(map[string]*base.SchemaProxy{
+							"field1": base.CreateSchemaProxy(&base.Schema{
+								Description: "I m field1",
+								Type:        []string{"string"},
+							}),
+						}),
+					}),
+					base.CreateSchemaProxy(&base.Schema{
+						Type:     []string{"object"},
+						Required: []string{"string_allof_override"},
+						Properties: orderedmap.ToOrderedMap(map[string]*base.SchemaProxy{
+							"field2": base.CreateSchemaProxy(&base.Schema{
+								Description: "I m field2",
+								Type:        []string{"string"},
+							}),
+						}),
+					}),
+				},
+			}),
+			expectedAttributes: attrmapper.ResourceAttributes{
+				&attrmapper.ResourceStringAttribute{
+					Name: "field1",
+					StringAttribute: resource.StringAttribute{
+						ComputedOptionalRequired: schema.ComputedOptional,
+						Description:              pointer("I m field1"),
+					},
+				},
+				&attrmapper.ResourceStringAttribute{
+					Name: "field2",
+					StringAttribute: resource.StringAttribute{
+						ComputedOptionalRequired: schema.ComputedOptional,
+						Description:              pointer("I m field2"),
 					},
 				},
 			},
